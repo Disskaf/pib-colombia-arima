@@ -325,5 +325,3 @@ def unificar_pib_colombia(ruta_carpeta: str) -> Tuple[pd.DataFrame, pd.DataFrame
     df_pib_unificado = df_pib_unificado.sort_index().asfreq('Q')
     
     return df_pib_unificado, df_base2015, df_base2005, df_base1994
-```
-_
