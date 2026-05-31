@@ -1,24 +1,13 @@
-"""
-Módulo de Ingeniería de Datos para el procesamiento, desencriptación,
-normalización y empalme en cascada de las series del PIB del DANE (1994-2026).
-"""
-
-import os
-import io
-import re
-import glob
-import warnings
-import unicodedata
-from typing import Tuple, List, Optional, Dict
 import pandas as pd
-import numpy as np
+import os
+import glob
+import re
+import io
 import msoffcrypto
-
-# Desactivación de advertencias de formato para mantener una salida limpia
-warnings.filterwarnings("ignore")
+import unicodedata
 
 # Diccionario de etiquetas normalizadas (sin acentos, en minúsculas y limpias)
-etiquetas_normalizadas: Dict[str, List[str]] = {
+etiquetas_normalizadas = {
     'construccion': ['construccion'],
     'financiero': [
         'establecimientos financieros, seguros, actividades inmobiliarias y servicios a las empresas',
@@ -27,23 +16,20 @@ etiquetas_normalizadas: Dict[str, List[str]] = {
     ]
 }
 
-
-def normalizar_texto(texto: any) -> str:
+def normalizar_texto(texto):
     """
-    Normaliza el texto de las celdas mediante la eliminación de acentos,
-    mayúsculas, saltos de línea y espacios redundantes para garantizar coincidencias exactas.
+    Normaliza el texto de las celdas eliminando acentos, mayúsculas,
+    saltos de línea y espacios redundantes para garantizar coincidencias exactas.
     """
     if pd.isna(texto):
         return ""
-    texto_limpio = str(texto).strip().lower()
-    texto_sin_acentos = ''.join(
-        c for c in unicodedata.normalize('NFD', texto_limpio)
-        if unicodedata.category(c) != 'Mn'
-    )
-    return re.sub(r'\s+', ' ', texto_sin_acentos)
+    texto = str(texto).strip().lower()
+    texto = ''.join(c for c in unicodedata.normalize('NFD', texto)
+                    if unicodedata.category(c) != 'Mn')
+    texto = re.sub(r'\s+', ' ', texto)
+    return texto
 
-
-def desencriptar_y_cargar_excel(ruta_archivo: str, motor: str) -> Optional[pd.ExcelFile]:
+def desencriptar_y_cargar_excel(ruta_archivo, motor):
     """
     Intenta abrir el archivo Excel. Si está encriptado con la protección estándar
     del DANE (VelvetSweatshop), lo desencripta en memoria usando msoffcrypto.
@@ -51,27 +37,33 @@ def desencriptar_y_cargar_excel(ruta_archivo: str, motor: str) -> Optional[pd.Ex
     try:
         return pd.ExcelFile(ruta_archivo, engine=motor)
     except Exception as e:
-        mensaje_error = str(e).lower()
-        es_encriptado = any(x in mensaje_error for x in ["encrypted", "encryption", "password"])
-        if not es_encriptado:
+        if "encrypted" in str(e).lower() or "encryption" in str(e).lower() or "password" in str(e).lower():
+            decrypted_stream = io.BytesIO()
+            with open(ruta_archivo, "rb") as f:
+                office_file = msoffcrypto.OfficeFile(f)
+                try:
+                    office_file.load_key(password="VelvetSweatshop")
+                    office_file.decrypt(decrypted_stream)
+                except Exception:
+                    f.seek(0)
+                    office_file.load_key(password="")
+                    office_file.decrypt(decrypted_stream)
+            decrypted_stream.seek(0)
+            return pd.ExcelFile(decrypted_stream, engine=motor)
+        else:
             raise e
 
-        decrypted_stream = io.BytesIO()
-        with open(ruta_archivo, "rb") as f:
-            office_file = msoffcrypto.OfficeFile(f)
-            try:
-                office_file.load_key(password="VelvetSweatshop")
-                office_file.decrypt(decrypted_stream)
-            except Exception:
-                f.seek(0)
-                office_file.load_key(password="")
-                office_file.decrypt(decrypted_stream)
-        
-        decrypted_stream.seek(0)
-        return pd.ExcelFile(decrypted_stream, engine=motor)
+def normalizar_trimestre(columna_str):
+    """Convierte formatos como '2006-I' o '2006-1' a formato fecha ISO de fin de trimestre"""
+    columna_str = str(columna_str).strip().upper()
+    mapeo = {'-I': '-03-31', '-II': '-06-30', '-III': '-09-30', '-IV': '-12-31',
+             ' 1': '-03-31', ' 2': '-06-30', ' 3': '-09-30', ' 4': '-12-31'}
+    for key, val in mapeo.items():
+        if key in columna_str:
+            return columna_str.replace(key, val)
+    return columna_str
 
-
-def extraer_series_archivo(ruta_archivo: str) -> pd.DataFrame:
+def extraer_series_archivo(ruta_archivo):
     """
     Identifica la estructura del archivo, gestiona la desencriptación,
     busca la hoja con datos reales (omitiendo índices) y extrae las series.
@@ -92,13 +84,7 @@ def extraer_series_archivo(ruta_archivo: str) -> pd.DataFrame:
                 hoja_seleccionada = cuadros_1[0]
         else:
             ramas_sheets = [h for h in hojas if any(x in h.lower() for x in ["ramas", "grandes", "abs"])]
-            
-            # Corrección del operador morsa para evitar errores de compilación y alcance
-            r_sheets = [
-                h for h in ramas_sheets 
-                if not any(x in h.lower() for x in ["var", "anual", "trim", "semest"])
-            ]
-            if r_sheets:
+            if r_sheets := [h for h in ramas_sheets if not any(x in h.lower() for x in ["var", "anual", "trim", "semest"])]:
                 hoja_seleccionada = r_sheets[0]
             elif len(hojas) > 1:
                 if any(x in hojas[0].lower() for x in ["indice", "índice", "menu", "menú"]):
@@ -226,15 +212,16 @@ def extraer_series_archivo(ruta_archivo: str) -> pd.DataFrame:
     return df_temp
 
 
-def unificar_pib_colombia(ruta_carpeta: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def unificar_pib_colombia(ruta_carpeta):
     """
-    Ejecuta el pipeline de consolidación y el algoritmo de retropolación sucesiva
-    con base en la estructura de datos original.
+    Función contenedora que llama al proceso original que funcionaba.
+    1. Ejecuta extracción iterativa en los 65 archivos
+    2. Consolida matrices
+    3. Empalme Macroeconómico de 3 Bases (Retropolación Sucesiva)
     """
     lista_archivos = glob.glob(os.path.join(ruta_carpeta, "*.xls*"))
-    if not lista_archivos:
-        raise FileNotFoundError(f"No se detectaron archivos de Excel en la ruta: {ruta_carpeta}")
-        
+    print(f"Procesando {len(lista_archivos)} archivos encontrados...")
+
     datos_consolidados = []
     for archivo in lista_archivos:
         datos_parciales = extraer_series_archivo(archivo)
@@ -242,15 +229,18 @@ def unificar_pib_colombia(ruta_carpeta: str) -> Tuple[pd.DataFrame, pd.DataFrame
             datos_consolidados.append(datos_parciales)
 
     if not datos_consolidados:
-        raise ValueError("No se extrajo información válida. Verifique las rutas o las etiquetas.")
+        raise ValueError("No se pudo extraer información válida de ningún archivo. Verifica la ruta o las etiquetas.")
 
-    # Consolidación de matrices
+    # 2. Consolidación de matrices
     df_total = pd.concat(datos_consolidados)
+
+    # Guardar un histórico de las bases originales para la validación de la Celda 3
+    df_total_original = df_total.copy()
 
     df_total = df_total.reset_index().sort_values(by=['Fecha', 'Base'], ascending=[True, False])
     df_total = df_total.drop_duplicates(subset='Fecha', keep='first').set_index('Fecha')
 
-    # Separación por bases históricas
+    # 3. Empalme Macroeconómico de 3 Bases (Retropolación Sucesiva)
     df_base2015 = df_total[df_total['Base'] == 2015][['Construccion', 'Sector_Financiero']].sort_index()
     df_base2005 = df_total[df_total['Base'] == 2005][['Construccion', 'Sector_Financiero']].sort_index()
     df_base1994 = df_total[df_total['Base'] == 1994][['Construccion', 'Sector_Financiero']].sort_index()
@@ -285,73 +275,5 @@ def unificar_pib_colombia(ruta_carpeta: str) -> Tuple[pd.DataFrame, pd.DataFrame
                 df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
 
     df_pib = df_pib.sort_index().asfreq('Q')
-    
+
     return df_pib, df_base2015, df_base2005, df_base1994
-```
-
-eof
-
----
-
-### Pasos definitivos para actualizar tu entorno en Google Colab:
-
-Sigue este protocolo riguroso en tu consola y en Colab para purgar las carpetas antiguas y forzar a Python a cargar la versión unificada sin operador morsa:
-
-#### 1. Sube el código limpio a GitHub:
-Reemplaza el contenido de tu archivo local `src/extraction_engine.py` con el código del bloque superior de arriba. Luego, ejecuta en tu terminal para sincronizarlo con la nube:
-```bash
-git add src/extraction_engine.py
-git commit -m "fix: restore legacy extraction engine logic without walrus scope issues"
-git push origin main
-```
-
-#### 2. Reemplaza por completo la Celda 1 de tu Google Colab:
-Para asegurarte de que Colab no conserve ningún archivo temporal huérfano en el disco virtual de la máquina, utiliza esta versión forzada de purga de directorios:
-```python
-# ==============================================================================
-# CELDA 1: Configuración de entorno y limpieza absoluta de caché
-# ==============================================================================
-import os
-import shutil
-import sys
-
-# Definir la ruta del proyecto clonado
-repo_name = 'pib-colombia-arima'
-
-# 1. Purgar físicamente directorios previos de Colab para romper la caché de disco
-for path in [repo_name, 'datos_pib', 'src']:
-    if os.path.exists(path):
-        shutil.rmtree(path)
-        print(f"🧹 Carpeta residual '{path}' eliminada con éxito.")
-
-# 2. Eliminar del registro de Python cualquier versión en caché de tus módulos
-for mod in list(sys.modules.keys()):
-    if "src" in mod or "extraction_engine" in mod:
-        sys.modules.pop(mod, None)
-print("🧹 Memoria intermedia de importación de Python purgada.")
-
-# 3. Clonar la última versión limpia de tu repositorio
-# REEMPLAZA "tu-usuario" con tu nombre de usuario de GitHub
-!git clone https://github.com/tu-usuario/pib-colombia-arima.git
-
-# 4. Cambiar de directorio y configurar el path del sistema
-%cd pib-colombia-arima
-sys.path.insert(0, os.path.abspath('.'))
-
-# 5. Instalar dependencias limpias
-!pip install pmdarima openpyxl xlrd==2.0.1 msoffcrypto-tool
-```
-
-#### 3. Corre tu Celda 2 importando la biblioteca:
-Ahora puedes llamar al motor en tu celda de Colab de forma elegante:
-```python
-# ==============================================================================
-# CELDA 2: Ejecución del pipeline ETL modularizado
-# ==============================================================================
-from src import unificar_pib_colombia
-
-# Se pasa la ruta de la carpeta de datos dentro del repositorio clonado
-df_pib, df_b2015, df_b2005, df_b1994 = unificar_pib_colombia('./data')
-
-print("\nEstructura final de los datos reales empalmados (Primeros 5 registros):")
-display(df_pib.head())
