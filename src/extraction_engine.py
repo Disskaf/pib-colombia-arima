@@ -1,10 +1,20 @@
-import pandas as pd
+"""
+Motor de Extracción y Procesamiento ETL (DANE)
+Diseñado para la extracción de series temporales del PIB y el empalme de bases históricas.
+"""
+
 import os
-import glob
 import re
 import io
-import msoffcrypto
+import glob
+import warnings
 import unicodedata
+import numpy as np
+import pandas as pd
+import msoffcrypto
+
+# Desactivar advertencias para limpieza de consola
+warnings.filterwarnings("ignore")
 
 # Diccionario de etiquetas normalizadas (sin acentos, en minúsculas y limpias)
 etiquetas_normalizadas = {
@@ -212,15 +222,16 @@ def extraer_series_archivo(ruta_archivo):
     return df_temp
 
 
-def unificar_pib_colombia(ruta_carpeta):
+def procesar_y_empalmar(ruta_carpeta):
     """
-    Función contenedora que llama al proceso original que funcionaba.
-    1. Ejecuta extracción iterativa en los 65 archivos
-    2. Consolida matrices
-    3. Empalme Macroeconómico de 3 Bases (Retropolación Sucesiva)
+    Itera sobre la carpeta de datos, extrae las series de los archivos Excel reales
+    del DANE, unifica las observaciones y realiza la retropolación matemática sucesiva.
     """
     lista_archivos = glob.glob(os.path.join(ruta_carpeta, "*.xls*"))
-    print(f"Procesando {len(lista_archivos)} archivos encontrados...")
+    if not lista_archivos:
+        raise ValueError(f"No se encontraron archivos en la ruta especificada: {ruta_carpeta}")
+    
+    print(f"Procesando {len(lista_archivos)} archivos encontrados en {ruta_carpeta}...")
 
     datos_consolidados = []
     for archivo in lista_archivos:
@@ -231,49 +242,52 @@ def unificar_pib_colombia(ruta_carpeta):
     if not datos_consolidados:
         raise ValueError("No se pudo extraer información válida de ningún archivo. Verifica la ruta o las etiquetas.")
 
-    # 2. Consolidación de matrices
+    # Consolidación de matrices
     df_total = pd.concat(datos_consolidados)
 
-    # Guardar un histórico de las bases originales para la validación de la Celda 3
+    # Copia para control y validación posterior
     df_total_original = df_total.copy()
 
+    # Ordenar y remover duplicados cronológicos manteniendo la base más reciente
     df_total = df_total.reset_index().sort_values(by=['Fecha', 'Base'], ascending=[True, False])
     df_total = df_total.drop_duplicates(subset='Fecha', keep='first').set_index('Fecha')
 
-    # 3. Empalme Macroeconómico de 3 Bases (Retropolación Sucesiva)
+    # Separar bases metodológicas para el algoritmo de empalme
     df_base2015 = df_total[df_total['Base'] == 2015][['Construccion', 'Sector_Financiero']].sort_index()
     df_base2005 = df_total[df_total['Base'] == 2005][['Construccion', 'Sector_Financiero']].sort_index()
     df_base1994 = df_total[df_total['Base'] == 1994][['Construccion', 'Sector_Financiero']].sort_index()
 
-    # Iniciamos con la base de nivel ancla (2015)
+    # Inicialización con base ancla (2015)
     df_pib = df_base2015.copy()
 
     # --- PASO A: Empalmar Base 2005 hacia atrás sobre Base 2015 ---
-    tasas_2005 = df_base2005.pct_change() + 1
-    fecha_ancla_2015 = df_base2015.index.min()
-    fechas_pasado_2005 = df_base2005.index[df_base2005.index < fecha_ancla_2015].sort_values(ascending=False)
+    if not df_base2005.empty:
+        tasas_2005 = df_base2005.pct_change() + 1
+        fecha_ancla_2015 = df_base2015.index.min()
+        fechas_pasado_2005 = df_base2005.index[df_base2005.index < fecha_ancla_2015].sort_values(ascending=False)
 
-    for fecha in fechas_pasado_2005:
-        fecha_siguiente_antigua = df_base2005.index[df_base2005.index > fecha].min()
-        if pd.notna(fecha_siguiente_antigua):
-            tasa = tasas_2005.loc[fecha_siguiente_antigua]
-            fecha_siguiente_nueva = df_pib.index[df_pib.index > fecha].min()
-            if pd.notna(fecha_siguiente_nueva):
-                df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
+        for fecha in fechas_pasado_2005:
+            fecha_siguiente_antigua = df_base2005.index[df_base2005.index > fecha].min()
+            if pd.notna(fecha_siguiente_antigua):
+                tasa = tasas_2005.loc[fecha_siguiente_antigua]
+                fecha_siguiente_nueva = df_pib.index[df_pib.index > fecha].min()
+                if pd.notna(fecha_siguiente_nueva):
+                    df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
 
     # --- PASO B: Empalmar Base 1994 hacia atrás sobre la serie ya unificada (2005 empalmada) ---
-    tasas_1994 = df_base1994.pct_change() + 1
-    fecha_ancla_2005 = df_base2005.index.min()
-    fechas_pasado_1994 = df_base1994.index[df_base1994.index < fecha_ancla_2005].sort_values(ascending=False)
+    if not df_base1994.empty:
+        tasas_1994 = df_base1994.pct_change() + 1
+        fecha_ancla_2005 = df_base2005.index.min() if not df_base2005.empty else df_base2015.index.min()
+        fechas_pasado_1994 = df_base1994.index[df_base1994.index < fecha_ancla_2005].sort_values(ascending=False)
 
-    for fecha in fechas_pasado_1994:
-        fecha_siguiente_antigua = df_base1994.index[df_base1994.index > fecha].min()
-        if pd.notna(fecha_siguiente_antigua):
-            tasa = tasas_1994.loc[fecha_siguiente_antigua]
-            fecha_siguiente_nueva = df_pib.index[df_pib.index > fecha].min()
-            if pd.notna(fecha_siguiente_nueva):
-                df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
+        for fecha in fechas_pasado_1994:
+            fecha_siguiente_antigua = df_base1994.index[df_base1994.index > fecha].min()
+            if pd.notna(fecha_siguiente_antigua):
+                tasa = tasas_1994.loc[fecha_siguiente_antigua]
+                fecha_siguiente_nueva = df_pib.index[df_pib.index > fecha].min()
+                if pd.notna(fecha_siguiente_nueva):
+                    df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
 
     df_pib = df_pib.sort_index().asfreq('Q')
-
-    return df_pib, df_base2015, df_base2005, df_base1994
+    
+    return df_pib, df_total_original, df_base2015, df_base2005, df_base1994
