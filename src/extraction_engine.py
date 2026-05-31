@@ -74,7 +74,7 @@ def desencriptar_archivo_excel(ruta_archivo: str, motor: str) -> Optional[pd.Exc
 def determinar_hoja_optima(lista_hojas: List[str], nombre_archivo: str) -> str:
     """
     Selecciona la hoja que contiene la matriz real de datos,
-    omitiendo índices o menús de navegación.
+    y descarta los índices o menús de navegación.
     """
     nombre_minuscula = nombre_archivo.lower()
     
@@ -86,7 +86,13 @@ def determinar_hoja_optima(lista_hojas: List[str], nombre_archivo: str) -> str:
             
     # Caso 2: Hojas con palabras clave de ramas de actividad
     ramas_filtradas = [h for h in lista_hojas if any(x in h.lower() for x in ["ramas", "grandes", "abs"])]
-    hojas_filtradas = [h for h in r_sheets if not any(x in h.lower() for x in ["var", "anual", "trim", "semest"])] if (r_sheets := ramas_filtradas) else []
+    if ramas_filtradas:
+        hojas_filtradas = [
+            h for h in ramas_filtradas 
+            if not any(x in h.lower() for x in ["var", "anual", "trim", "semest"])
+        ]
+    else:
+        hojas_filtradas = []
     
     if hojas_filtradas:
         return hojas_filtradas[0]
@@ -319,3 +325,5 @@ def unificar_pib_colombia(ruta_carpeta: str) -> Tuple[pd.DataFrame, pd.DataFrame
     df_pib_unificado = df_pib_unificado.sort_index().asfreq('Q')
     
     return df_pib_unificado, df_base2015, df_base2005, df_base1994
+```
+_
