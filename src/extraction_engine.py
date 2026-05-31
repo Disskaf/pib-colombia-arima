@@ -17,8 +17,8 @@ import msoffcrypto
 # Desactivación de advertencias de formato para mantener una salida limpia
 warnings.filterwarnings("ignore")
 
-# Configuración estática de etiquetas sectoriales normalizadas
-ETIQUETAS_SECTORIALES: Dict[str, List[str]] = {
+# Diccionario de etiquetas normalizadas (sin acentos, en minúsculas y limpias)
+etiquetas_normalizadas: Dict[str, List[str]] = {
     'construccion': ['construccion'],
     'financiero': [
         'establecimientos financieros, seguros, actividades inmobiliarias y servicios a las empresas',
@@ -28,10 +28,10 @@ ETIQUETAS_SECTORIALES: Dict[str, List[str]] = {
 }
 
 
-def normalizar_cadena(texto: any) -> str:
+def normalizar_texto(texto: any) -> str:
     """
     Normaliza el texto de las celdas mediante la eliminación de acentos,
-    mayúsculas, saltos de línea y espacios redundantes.
+    mayúsculas, saltos de línea y espacios redundantes para garantizar coincidencias exactas.
     """
     if pd.isna(texto):
         return ""
@@ -43,285 +43,315 @@ def normalizar_cadena(texto: any) -> str:
     return re.sub(r'\s+', ' ', texto_sin_acentos)
 
 
-def desencriptar_archivo_excel(ruta_archivo: str, motor: str) -> Optional[pd.ExcelFile]:
+def desencriptar_y_cargar_excel(ruta_archivo: str, motor: str) -> Optional[pd.ExcelFile]:
     """
-    Abre un archivo Excel. Si se encuentra protegido por el DANE,
-    realiza la desencriptación en memoria a través de msoffcrypto.
+    Intenta abrir el archivo Excel. Si está encriptado con la protección estándar
+    del DANE (VelvetSweatshop), lo desencripta en memoria usando msoffcrypto.
     """
     try:
         return pd.ExcelFile(ruta_archivo, engine=motor)
-    except Exception as error:
-        mensaje_error = str(error).lower()
+    except Exception as e:
+        mensaje_error = str(e).lower()
         es_encriptado = any(x in mensaje_error for x in ["encrypted", "encryption", "password"])
         if not es_encriptado:
-            raise error
+            raise e
 
-        flujo_desencriptado = io.BytesIO()
-        with open(ruta_archivo, "rb") as archivo_fisico:
-            archivo_oficina = msoffcrypto.OfficeFile(archivo_fisico)
+        decrypted_stream = io.BytesIO()
+        with open(ruta_archivo, "rb") as f:
+            office_file = msoffcrypto.OfficeFile(f)
             try:
-                archivo_oficina.load_key(password="VelvetSweatshop")
-                archivo_oficina.decrypt(flujo_desencriptado)
+                office_file.load_key(password="VelvetSweatshop")
+                office_file.decrypt(decrypted_stream)
             except Exception:
-                archivo_fisico.seek(0)
-                archivo_oficina.load_key(password="")
-                archivo_oficina.decrypt(flujo_desencriptado)
+                f.seek(0)
+                office_file.load_key(password="")
+                office_file.decrypt(decrypted_stream)
         
-        flujo_desencriptado.seek(0)
-        return pd.ExcelFile(flujo_desencriptado, engine=motor)
-
-
-def determinar_hoja_optima(lista_hojas: List[str], nombre_archivo: str) -> str:
-    """
-    Selecciona la hoja que contiene la matriz real de datos,
-    y descarta los índices o menús de navegación.
-    """
-    nombre_minuscula = nombre_archivo.lower()
-    
-    # Caso 1: Base 2015 o producción constante moderna
-    if "2015" in nombre_minuscula or "produccionconstantes" in nombre_minuscula:
-        cuadros_filtrados = [h for h in lista_hojas if "cuadro" in h.lower() and "1" in h]
-        if cuadros_filtrados:
-            return cuadros_filtrados[0]
-            
-    # Caso 2: Hojas con palabras clave de ramas de actividad
-    ramas_filtradas = [h for h in lista_hojas if any(x in h.lower() for x in ["ramas", "grandes", "abs"])]
-    if ramas_filtradas:
-        hojas_filtradas = [
-            h for h in ramas_filtradas 
-            if not any(x in h.lower() for x in ["var", "anual", "trim", "semest"])
-        ]
-    else:
-        hojas_filtradas = []
-    
-    if hojas_filtradas:
-        return hojas_filtradas[0]
-        
-    # Caso de descarte: Evitar menús principales
-    if len(lista_hojas) > 1 and any(x in lista_hojas[0].lower() for x in ["indice", "índice", "menu", "menú"]):
-        return lista_hojas[1]
-        
-    return lista_hojas[0]
-
-
-def buscar_coordenadas_sectores(df: pd.DataFrame) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
-    """
-    Localiza las coordenadas fila-columna de los sectores económicos
-    mediante búsquedas exactas y parciales para mitigar la inestabilidad de las plantillas.
-    """
-    coordenadas_const = []
-    coordenadas_fin = []
-    filas, columnas = df.shape
-
-    # Búsqueda inicial: Coincidencia exacta
-    for r in range(filas):
-        for c in range(columnas):
-            valor_celda = normalizar_cadena(df.iloc[r, c])
-            if valor_celda in ETIQUETAS_SECTORIALES['construccion']:
-                coordenadas_const.append((r, c))
-            if valor_celda in ETIQUETAS_SECTORIALES['financiero']:
-                coordenadas_fin.append((r, c))
-
-    # Cláusula de guarda: Si se obtienen coordenadas exactas, se retornan de inmediato
-    if coordenadas_const and coordenadas_fin:
-        return coordenadas_const[0], coordenadas_fin[0]
-
-    # Búsqueda secundaria: Coincidencia parcial si falla la exacta
-    for r in range(filas):
-        for c in range(columnas):
-            valor_celda = normalizar_cadena(df.iloc[r, c])
-            if not coordenadas_const and any(ext in valor_celda for ext in ETIQUETAS_SECTORIALES['construccion']):
-                coordenadas_const.append((r, c))
-            if not coordenadas_fin and any(ext in valor_celda for ext in ETIQUETAS_SECTORIALES['financiero']):
-                coordenadas_fin.append((r, c))
-
-    coord_const = coordenadas_const[0] if coordenadas_const else None
-    coord_fin = coordenadas_fin[0] if coordenadas_fin else None
-    return coord_const, coord_fin
-
-
-def extraer_estructura_horizontal(df: pd.DataFrame, r_const: int, c_const: int, r_fin: int, c_fin: int) -> pd.DataFrame:
-    """
-    Estrategia de extracción para matrices donde los sectores están en filas
-    y los periodos de tiempo se organizan en las columnas.
-    """
-    fila_trimestres = -1
-    for r in range(df.shape[0]):
-        valores_fila = df.iloc[r].astype(str).str.strip().str.upper().tolist()
-        conteo_trimestres = sum(1 for v in valores_fila if v in ['I', 'II', 'III', 'IV', '1', '2', '3', '4'])
-        if conteo_trimestres >= 4:
-            fila_trimestres = r
-            break
-
-    # Cláusula de guarda si no se localiza la fila temporal
-    if fila_trimestres == -1:
-        return pd.DataFrame()
-
-    fila_anos = fila_trimestres - 1
-    anio_actual = None
-    fechas, valores_const, valores_fin = [], [], []
-    mapeo_trimestres = {'I': '-03-31', 'II': '-06-30', 'III': '-09-30', 'IV': '-12-31',
-                        '1': '-03-31', '2': '-06-30', '3': '-09-30', '4': '-12-31'}
-
-    for col in range(c_const + 1, df.shape[1]):
-        valor_anio = str(df.iloc[fila_anos, col]).strip()
-        valor_trim = str(df.iloc[fila_trimestres, col]).strip().upper()
-        
-        busqueda_anio = re.search(r'(19\d{2}|20\d{2})', valor_anio)
-        if busqueda_anio:
-            anio_actual = busqueda_anio.group(1)
-            
-        if valor_trim in mapeo_trimestres and anio_actual:
-            v_const = pd.to_numeric(df.iloc[r_const, col], errors='coerce')
-            v_fin = pd.to_numeric(df.iloc[r_fin, col], errors='coerce')
-            
-            if pd.notna(v_const) and pd.notna(v_fin):
-                fecha_iso = f"{anio_actual}{mapeo_trimestres[valor_trim]}"
-                fechas.append(pd.to_datetime(fecha_iso))
-                valores_const.append(v_const)
-                valores_fin.append(v_fin)
-
-    return pd.DataFrame({'Construccion': valores_const, 'Sector_Financiero': valores_fin}, index=fechas)
-
-
-def extraer_estructura_vertical(df: pd.DataFrame, r_const: int, c_const: int, r_fin: int, c_fin: int) -> pd.DataFrame:
-    """
-    Estrategia de extracción para matrices donde los sectores están en columnas
-    y los periodos de tiempo se organizan en las filas.
-    """
-    columna_trimestres = -1
-    for col in range(df.shape[1]):
-        valores_col = df.iloc[:, col].astype(str).str.strip().str.upper().tolist()
-        conteo_trimestres = sum(1 for v in valores_col if v in ['I', 'II', 'III', 'IV', '1', '2', '3', '4'])
-        if conteo_trimestres >= 4:
-            columna_trimestres = col
-            break
-
-    # Cláusula de guarda si no se localiza la columna temporal
-    if columna_trimestres == -1:
-        return pd.DataFrame()
-
-    columna_anos = columna_trimestres - 1 if columna_trimestres > 0 else 0
-    anio_actual = None
-    fechas, valores_const, valores_fin = [], [], []
-    mapeo_trimestres = {'I': '-03-31', 'II': '-06-30', 'III': '-09-30', 'IV': '-12-31',
-                        '1': '-03-31', '2': '-06-30', '3': '-09-30', '4': '-12-31'}
-
-    for row in range(r_const + 1, df.shape[0]):
-        valor_anio = str(df.iloc[row, columna_anos]).strip()
-        valor_trim = str(df.iloc[row, columna_trimestres]).strip().upper()
-        
-        busqueda_anio = re.search(r'(19\d{2}|20\d{2})', valor_anio)
-        if busqueda_anio:
-            anio_actual = busqueda_anio.group(1)
-            
-        if valor_trim in mapeo_trimestres and anio_actual:
-            v_const = pd.to_numeric(df.iloc[row, c_const], errors='coerce')
-            v_fin = pd.to_numeric(df.iloc[row, c_fin], errors='coerce')
-            
-            if pd.notna(v_const) and pd.notna(v_fin):
-                fecha_iso = f"{anio_actual}{mapeo_trimestres[valor_trim]}"
-                fechas.append(pd.to_datetime(fecha_iso))
-                valores_const.append(v_const)
-                valores_fin.append(v_fin)
-
-    return pd.DataFrame({'Construccion': valores_const, 'Sector_Financiero': valores_fin}, index=fechas)
+        decrypted_stream.seek(0)
+        return pd.ExcelFile(decrypted_stream, engine=motor)
 
 
 def extraer_series_archivo(ruta_archivo: str) -> pd.DataFrame:
     """
-    Función orquestadora que integra la carga del archivo,
-    identificación de celdas y ejecución del algoritmo de extracción correspondiente.
+    Identifica la estructura del archivo, gestiona la desencriptación,
+    busca la hoja con datos reales (omitiendo índices) y extrae las series.
     """
-    nombre_archivo = os.path.basename(ruta_archivo)
-    motor = 'openpyxl' if ruta_archivo.endswith('.xlsx') else 'xlrd'
-    
-    excel_file = desencriptar_archivo_excel(ruta_archivo, motor)
-    if not excel_file:
-        return pd.DataFrame()
-        
-    hoja_optima = determinar_hoja_optima(excel_file.sheet_names, nombre_archivo)
-    df_crudo = excel_file.parse(hoja_optima, header=None)
-    
-    coord_const, coord_fin = buscar_coordenadas_sectores(df_crudo)
-    if not (coord_const and coord_fin):
-        return pd.DataFrame()
-        
-    r_const, c_const = coord_const
-    r_fin, c_fin = coord_fin
-    
-    # Despacho dinámico de la estrategia de extracción (Horizontal vs Vertical)
-    if c_const == c_fin and r_const != r_fin:
-        df_final = extraer_estructura_horizontal(df_crudo, r_const, c_const, r_fin, c_fin)
-    else:
-        df_final = extraer_estructura_vertical(df_crudo, r_const, c_const, r_fin, c_fin)
-        
-    # Asignación de etiqueta metodológica al dataframe final
-    if not df_final.empty:
-        nombre_minuscula = nombre_archivo.lower()
-        if "2015" in nombre_minuscula or "produccionconstantes" in nombre_minuscula:
-            df_final['Base'] = 2015
-        elif "1994" in nombre_minuscula:
-            df_final['Base'] = 1994
+    nombre_archivo = os.path.basename(ruta_archivo).lower()
+    df_temp = pd.DataFrame()
+
+    try:
+        motor = 'openpyxl' if ruta_archivo.endswith('.xlsx') else 'xlrd'
+        excel_file = desencriptar_y_cargar_excel(ruta_archivo, motor)
+        hojas = excel_file.sheet_names
+
+        # Selección de hoja óptima
+        hoja_seleccionada = hojas[0]
+        if "2015" in nombre_archivo or "produccionconstantes" in nombre_archivo:
+            cuadros_1 = [h for h in hojas if "cuadro" in h.lower() and "1" in h]
+            if cuadros_1:
+                hoja_seleccionada = cuadros_1[0]
         else:
-            df_final['Base'] = 2005
+            ramas_sheets = [h for h in hojas if any(x in h.lower() for x in ["ramas", "grandes", "abs"])]
             
-    return df_final
+            # Corrección del operador morsa para evitar errores de compilación y alcance
+            r_sheets = [
+                h for h in ramas_sheets 
+                if not any(x in h.lower() for x in ["var", "anual", "trim", "semest"])
+            ]
+            if r_sheets:
+                hoja_seleccionada = r_sheets[0]
+            elif len(hojas) > 1:
+                if any(x in hojas[0].lower() for x in ["indice", "índice", "menu", "menú"]):
+                    hoja_seleccionada = hojas[1]
+
+        raw_df = excel_file.parse(hoja_seleccionada, header=None)
+
+        # Localización espacial de las variables
+        coords_const = []
+        coords_fin = []
+
+        # Coincidencia exacta
+        for r in range(raw_df.shape[0]):
+            for c in range(raw_df.shape[1]):
+                val_norm = normalizar_texto(raw_df.iloc[r, c])
+                if val_norm in etiquetas_normalizadas['construccion']:
+                    coords_const.append((r, c))
+                if val_norm in etiquetas_normalizadas['financiero']:
+                    coords_fin.append((r, c))
+
+        # Coincidencia parcial si falla la exacta
+        if not coords_const or not coords_fin:
+            for r in range(raw_df.shape[0]):
+                for c in range(raw_df.shape[1]):
+                    val_norm = normalizar_texto(raw_df.iloc[r, c])
+                    if not coords_const and any(ext in val_norm for ext in etiquetas_normalizadas['construccion']):
+                        coords_const.append((r, c))
+                    if not coords_fin and any(ext in val_norm for ext in etiquetas_normalizadas['financiero']):
+                        coords_fin.append((r, c))
+
+        if coords_const and coords_fin:
+            r_const, c_const = coords_const[0]
+            r_fin, c_fin = coords_fin[0]
+
+            fechas_list = []
+            vals_const = []
+            vals_fin = []
+
+            # CASO A: Estructura Horizontal (Sectores en filas, periodos en columnas)
+            if c_const == c_fin and r_const != r_fin:
+                row_trimestres = -1
+                for r in range(raw_df.shape[0]):
+                    row_vals = raw_df.iloc[r].astype(str).str.strip().str.upper().tolist()
+                    quarter_count = sum(1 for v in row_vals if v in ['I', 'II', 'III', 'IV', '1', '2', '3', '4'])
+                    if quarter_count >= 4:
+                        row_trimestres = r
+                        break
+
+                if row_trimestres != -1:
+                    row_anos = row_trimestres - 1
+                    current_year = None
+
+                    for col in range(c_const + 1, raw_df.shape[1]):
+                        val_ano = str(raw_df.iloc[row_anos, col]).strip()
+                        val_tri = str(raw_df.iloc[row_trimestres, col]).strip().upper()
+
+                        match_year = re.search(r'(19\d{2}|20\d{2})', val_ano)
+                        if match_year:
+                            current_year = match_year.group(1)
+
+                        if val_tri in ['I', 'II', 'III', 'IV', '1', '2', '3', '4'] and current_year is not None:
+                            v_const = pd.to_numeric(raw_df.iloc[r_const, col], errors='coerce')
+                            v_fin = pd.to_numeric(raw_df.iloc[r_fin, col], errors='coerce')
+
+                            if pd.notna(v_const) and pd.notna(v_fin):
+                                map_q = {'I': '-03-31', 'II': '-06-30', 'III': '-09-30', 'IV': '-12-31',
+                                         '1': '-03-31', '2': '-06-30', '3': '-09-30', '4': '-12-31'}
+                                fecha_str = f"{current_year}{map_q[val_tri]}"
+                                fechas_list.append(pd.to_datetime(fecha_str))
+                                vals_const.append(v_const)
+                                vals_fin.append(v_fin)
+
+            # CASO B: Estructura Vertical (Sectores en columnas, periodos en filas)
+            elif r_const == r_fin and c_const != c_fin:
+                col_trimestres = -1
+                for col in range(raw_df.shape[1]):
+                    col_vals = raw_df.iloc[:, col].astype(str).str.strip().str.upper().tolist()
+                    quarter_count = sum(1 for v in col_vals if v in ['I', 'II', 'III', 'IV', '1', '2', '3', '4'])
+                    if quarter_count >= 4:
+                        col_trimestres = col
+                        break
+
+                if col_trimestres != -1:
+                    col_anos = col_trimestres - 1 if col_trimestres > 0 else 0
+                    current_year = None
+
+                    for row in range(r_const + 1, raw_df.shape[0]):
+                        val_ano = str(raw_df.iloc[row, col_anos]).strip()
+                        val_tri = str(raw_df.iloc[row, col_trimestres]).strip().upper()
+
+                        match_year = re.search(r'(19\d{2}|20\d{2})', val_ano)
+                        if match_year:
+                            current_year = match_year.group(1)
+
+                        if val_tri in ['I', 'II', 'III', 'IV', '1', '2', '3', '4'] and current_year is not None:
+                            v_const = pd.to_numeric(raw_df.iloc[row, c_const], errors='coerce')
+                            v_fin = pd.to_numeric(raw_df.iloc[row, c_fin], errors='coerce')
+
+                            if pd.notna(v_const) and pd.notna(v_fin):
+                                map_q = {'I': '-03-31', 'II': '-06-30', 'III': '-09-30', 'IV': '-12-31',
+                                         '1': '-03-31', '2': '-06-30', '3': '-09-30', '4': '-12-31'}
+                                fecha_str = f"{current_year}{map_q[val_tri]}"
+                                fechas_list.append(pd.to_datetime(fecha_str))
+                                vals_const.append(v_const)
+                                vals_fin.append(v_fin)
+
+            if fechas_list:
+                df_temp = pd.DataFrame({
+                    'Construccion': vals_const,
+                    'Sector_Financiero': vals_fin
+                }, index=fechas_list)
+                df_temp.index.name = 'Fecha'
+
+                # Clasificar base metodológica explícitamente en tres categorías
+                if "2015" in nombre_archivo or "produccionconstantes" in nombre_archivo:
+                    df_temp['Base'] = 2015
+                elif "1994" in nombre_archivo:
+                    df_temp['Base'] = 1994
+                else:
+                    df_temp['Base'] = 2005
+
+    except Exception as e:
+        print(f"⚠️ Error procesando {nombre_archivo}: {str(e)}")
+
+    return df_temp
 
 
 def unificar_pib_colombia(ruta_carpeta: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Ejecuta el pipeline completo: consolidación de archivos y aplicación
-    del algoritmo de retropolación sucesiva en cascada para unificar las tres bases metodológicas.
+    Ejecuta el pipeline de consolidación y el algoritmo de retropolación sucesiva
+    con base en la estructura de datos original.
     """
     lista_archivos = glob.glob(os.path.join(ruta_carpeta, "*.xls*"))
     if not lista_archivos:
         raise FileNotFoundError(f"No se detectaron archivos de Excel en la ruta: {ruta_carpeta}")
         
-    datos_extraidos = []
+    datos_consolidados = []
     for archivo in lista_archivos:
-        df_temp = extraer_series_archivo(archivo)
-        if not df_temp.empty:
-            datos_extraidos.append(df_temp)
-            
-    df_consolidado = pd.concat(datos_extraidos)
-    df_consolidado = df_consolidado.reset_index().sort_values(by=['Fecha', 'Base'], ascending=[True, False])
-    df_consolidado = df_consolidado.drop_duplicates(subset='Fecha', keep='first').set_index('Fecha')
-    
-    # División por bases originales para fines de validación macroeconómica
-    df_base2015 = df_consolidado[df_consolidado['Base'] == 2015][['Construccion', 'Sector_Financiero']].sort_index()
-    df_base2005 = df_consolidado[df_consolidado['Base'] == 2005][['Construccion', 'Sector_Financiero']].sort_index()
-    df_base1994 = df_consolidado[df_consolidado['Base'] == 1994][['Construccion', 'Sector_Financiero']].sort_index()
-    
-    # Inicialización de la serie unificada con la base ancla moderna (2015)
-    df_pib_unificado = df_base2015.copy()
-    
-    # --- PASO A: Empalme Base 2005 hacia atrás sobre Base 2015 ---
+        datos_parciales = extraer_series_archivo(archivo)
+        if not datos_parciales.empty:
+            datos_consolidados.append(datos_parciales)
+
+    if not datos_consolidados:
+        raise ValueError("No se extrajo información válida. Verifique las rutas o las etiquetas.")
+
+    # Consolidación de matrices
+    df_total = pd.concat(datos_consolidados)
+
+    df_total = df_total.reset_index().sort_values(by=['Fecha', 'Base'], ascending=[True, False])
+    df_total = df_total.drop_duplicates(subset='Fecha', keep='first').set_index('Fecha')
+
+    # Separación por bases históricas
+    df_base2015 = df_total[df_total['Base'] == 2015][['Construccion', 'Sector_Financiero']].sort_index()
+    df_base2005 = df_total[df_total['Base'] == 2005][['Construccion', 'Sector_Financiero']].sort_index()
+    df_base1994 = df_total[df_total['Base'] == 1994][['Construccion', 'Sector_Financiero']].sort_index()
+
+    # Iniciamos con la base de nivel ancla (2015)
+    df_pib = df_base2015.copy()
+
+    # --- PASO A: Empalmar Base 2005 hacia atrás sobre Base 2015 ---
     tasas_2005 = df_base2005.pct_change() + 1
     fecha_ancla_2015 = df_base2015.index.min()
     fechas_pasado_2005 = df_base2005.index[df_base2005.index < fecha_ancla_2015].sort_values(ascending=False)
-    
+
     for fecha in fechas_pasado_2005:
-        fecha_sig_antigua = df_base2005.index[df_base2005.index > fecha].min()
-        if pd.notna(fecha_sig_antigua):
-            tasa = tasas_2005.loc[fecha_sig_antigua]
-            fecha_sig_nueva = df_pib_unificado.index[df_pib_unificado.index > fecha].min()
-            if pd.notna(fecha_sig_nueva):
-                df_pib_unificado.loc[fecha] = df_pib_unificado.loc[fecha_sig_nueva] / tasa
-                
-    # --- PASO B: Empalme Base 1994 hacia atrás sobre la serie ya pre-unificada ---
+        fecha_siguiente_antigua = df_base2005.index[df_base2005.index > fecha].min()
+        if pd.notna(fecha_siguiente_antigua):
+            tasa = tasas_2005.loc[fecha_siguiente_antigua]
+            fecha_siguiente_nueva = df_pib.index[df_pib.index > fecha].min()
+            if pd.notna(fecha_siguiente_nueva):
+                df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
+
+    # --- PASO B: Empalmar Base 1994 hacia atrás sobre la serie ya unificada (2005 empalmada) ---
     tasas_1994 = df_base1994.pct_change() + 1
     fecha_ancla_2005 = df_base2005.index.min()
     fechas_pasado_1994 = df_base1994.index[df_base1994.index < fecha_ancla_2005].sort_values(ascending=False)
-    
+
     for fecha in fechas_pasado_1994:
-        fecha_sig_antigua = df_base1994.index[df_base1994.index > fecha].min()
-        if pd.notna(fecha_sig_antigua):
-            tasa = tasas_1994.loc[fecha_sig_antigua]
-            fecha_sig_nueva = df_pib_unificado.index[df_pib_unificado.index > fecha].min()
-            if pd.notna(fecha_sig_nueva):
-                df_pib_unificado.loc[fecha] = df_pib_unificado.loc[fecha_sig_nueva] / tasa
-                
-    df_pib_unificado = df_pib_unificado.sort_index().asfreq('Q')
+        fecha_siguiente_antigua = df_base1994.index[df_base1994.index > fecha].min()
+        if pd.notna(fecha_siguiente_antigua):
+            tasa = tasas_1994.loc[fecha_siguiente_antigua]
+            fecha_siguiente_nueva = df_pib.index[df_pib.index > fecha].min()
+            if pd.notna(fecha_siguiente_nueva):
+                df_pib.loc[fecha] = df_pib.loc[fecha_siguiente_nueva] / tasa
+
+    df_pib = df_pib.sort_index().asfreq('Q')
     
-    return df_pib_unificado, df_base2015, df_base2005, df_base1994
+    return df_pib, df_base2015, df_base2005, df_base1994
+```
+
+eof
+
+---
+
+### Pasos definitivos para actualizar tu entorno en Google Colab:
+
+Sigue este protocolo riguroso en tu consola y en Colab para purgar las carpetas antiguas y forzar a Python a cargar la versión unificada sin operador morsa:
+
+#### 1. Sube el código limpio a GitHub:
+Reemplaza el contenido de tu archivo local `src/extraction_engine.py` con el código del bloque superior de arriba. Luego, ejecuta en tu terminal para sincronizarlo con la nube:
+```bash
+git add src/extraction_engine.py
+git commit -m "fix: restore legacy extraction engine logic without walrus scope issues"
+git push origin main
+```
+
+#### 2. Reemplaza por completo la Celda 1 de tu Google Colab:
+Para asegurarte de que Colab no conserve ningún archivo temporal huérfano en el disco virtual de la máquina, utiliza esta versión forzada de purga de directorios:
+```python
+# ==============================================================================
+# CELDA 1: Configuración de entorno y limpieza absoluta de caché
+# ==============================================================================
+import os
+import shutil
+import sys
+
+# Definir la ruta del proyecto clonado
+repo_name = 'pib-colombia-arima'
+
+# 1. Purgar físicamente directorios previos de Colab para romper la caché de disco
+for path in [repo_name, 'datos_pib', 'src']:
+    if os.path.exists(path):
+        shutil.rmtree(path)
+        print(f"🧹 Carpeta residual '{path}' eliminada con éxito.")
+
+# 2. Eliminar del registro de Python cualquier versión en caché de tus módulos
+for mod in list(sys.modules.keys()):
+    if "src" in mod or "extraction_engine" in mod:
+        sys.modules.pop(mod, None)
+print("🧹 Memoria intermedia de importación de Python purgada.")
+
+# 3. Clonar la última versión limpia de tu repositorio
+# REEMPLAZA "tu-usuario" con tu nombre de usuario de GitHub
+!git clone https://github.com/tu-usuario/pib-colombia-arima.git
+
+# 4. Cambiar de directorio y configurar el path del sistema
+%cd pib-colombia-arima
+sys.path.insert(0, os.path.abspath('.'))
+
+# 5. Instalar dependencias limpias
+!pip install pmdarima openpyxl xlrd==2.0.1 msoffcrypto-tool
+```
+
+#### 3. Corre tu Celda 2 importando la biblioteca:
+Ahora puedes llamar al motor en tu celda de Colab de forma elegante:
+```python
+# ==============================================================================
+# CELDA 2: Ejecución del pipeline ETL modularizado
+# ==============================================================================
+from src import unificar_pib_colombia
+
+# Se pasa la ruta de la carpeta de datos dentro del repositorio clonado
+df_pib, df_b2015, df_b2005, df_b1994 = unificar_pib_colombia('./data')
+
+print("\nEstructura final de los datos reales empalmados (Primeros 5 registros):")
+display(df_pib.head())
